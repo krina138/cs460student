@@ -16,6 +16,7 @@
 <body>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TrackballControls.js"></script>
 
 <script>
     const scene = new THREE.Scene();
@@ -32,18 +33,17 @@
     document.body.appendChild(renderer.domElement);
 
     const geometry = new THREE.BoxGeometry(1, 1, 1);
-    const material = new THREE.MeshNormalMaterial();
+    const material = new THREE.MeshNormalMaterial({ color: 0xffffff });
     const cube = new THREE.Mesh(geometry, material);
 
     scene.add(cube);
     camera.position.z = 3;
+    const controls = new THREE.TrackballControls(camera, renderer.domElement);
 
     function animate() {
         requestAnimationFrame(animate);
-
-        cube.rotation.x += 0.01;
-        cube.rotation.y += 0.01;
-
+        
+        controls.update();
         renderer.render(scene, camera);
     }
 
