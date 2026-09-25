@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>XTK Cube Art</title>
+    <style>
+        body, html {margin:0; padding:0; overflow:hidden; background:#111;}
+        #render { width:100vw; height:100vh; }
+    </style>
+    <!-- XTK library -->
+    <script type="text/javascript" src="https://get.goXTK.com/xtk_edge.js"></script>
+</head>
+<body>
+    <div id="render"></div>
+    <script>
+        // Initialise renderer
+        const renderer = new X.renderer3D();
+        renderer.container = "render";
+        renderer.camera = {position: [0,0,70]};
+        renderer.init();
+        // Helper to create a cube with random color and position
+        function createCube(size, pos) {
+            const cube = new X.cube();
+            cube.center = pos;
+            cube.color = [Math.random(), Math.random(), Math.random()];
+            cube.lengthX = cube.lengthY = cube.lengthZ = size;
+            cube.opacity = 0.8;
+            return cube;
+        }
+        // Primary rotating cube (centered)
+        const mainCube = createCube(20, [0,0,0]);
+        renderer.add(mainCube);
+        // Create a swarm of small flying cubes
+        const swarm = [];
+        const swarmCount = 30;
+        for(let i=0;i<swarmCount;i++){
+            const size = 3 + Math.random()*4;
+            const pos = [ (Math.random()-0.5)*80, (Math.random()-0.5)*80, (Math.random()-0.5)*80 ];
+            const cube = createCube(size, pos);
+            // assign a random velocity vector
+            cube.velocity = [ (Math.random()-0.5)*0.5, (Math.random()-0.5)*0.5, (Math.random()-0.5)*0.5 ];
+            swarm.push(cube);
+            renderer.add(cube);
+        }
+        // Animation loop
+        let angle = 0;
+        function animate(){
+            // Rotate main cube
+            angle += 0.5; // degrees per frame
+            const rad = angle * Math.PI/180;
+            mainCube.transform.rotateX = rad;
+            mainCube.transform.rotateY = rad*0.7;
+            // Change its color over time
+            const hue = (angle % 360) / 360;
+            const rgb = hsvToRgb(hue, 1, 1);
+            mainCube.color = rgb;
+            // Move swarm cubes
+            swarm.forEach(c => {
+                // Update position
+                c.center[0] += c.velocity[0];
+                c.center[1] += c.velocity[1];
+                c.center[2] += c.velocity[2];
+                // Bounce off bounds
+                for(let j=0;j<3;j++){
+                    if(Math.abs(c.center[j]) > 40){
+                        c.velocity[j] = -c.velocity[j];
+                    }
+                }
+                // Slowly fade colors and re‑randomise
+                if(Math.random() < 0.01){
+                    c.color = [Math.random(), Math.random(), Math.random()];
+                }
+            });
+            renderer.render();
+            requestAnimationFrame(animate);
+        }
+        // Simple HSV→RGB conversion (values 0‑1)
+        function hsvToRgb(h, s, v){
+            let i = Math.floor(h*6);
+            let f = h*6 - i;
+            let p = v * (1 - s);
+            let q = v * (1 - f * s);
+            let t = v * (1 - (1 - f) * s);
+            switch(i % 6){
+                case 0: return [v, t, p];
+                case 1: return [q, v, p];
+                case 2: return [p, v, t];
+                case 3: return [p, q, v];
+                case 4: return [t, p, v];
+                case 5: return [v, p, q];
+            }
+        }
+        // Start animation
+        animate();
+    </script>
+</body>
+</html>
