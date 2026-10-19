@@ -1,0 +1,504 @@
+
+<html>
+<head>
+  <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+  <meta content="utf-8" http-equiv="encoding">
+  <title>Default WebGL!</title>
+
+  <style>
+    html, body {
+      background: url('https://cs460.org/assignments/04/bg.jpg');
+      background-size: cover;
+      background-position: center;
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      overflow: hidden !important;
+    }
+
+    #c {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+  </style>
+</head>
+
+<script type="text/javascript" src="https://cs460.org/js/glmatrix.js"></script>
+
+<script id="vertexshader" type="glsl">
+  attribute vec3 a_position;
+
+  uniform mat4 u_transform;
+  uniform float u_pointsize;
+
+  void main(void) {
+    gl_Position = u_transform * vec4(a_position, 1.0);
+    gl_PointSize = u_pointsize;
+  }
+</script>
+
+<script id="fragmentshader" type="glsl">
+  precision mediump float;
+
+  uniform vec4 u_color;
+  uniform float u_is_eye;
+
+  void main(void) {
+    if (u_is_eye > 0.5) {
+      vec2 center = gl_PointCoord - vec2(0.5);
+
+      if (length(center) > 0.5) {
+        discard;
+      }
+    }
+
+    gl_FragColor = u_color;
+  }
+</script>
+
+<script>
+  var c, gl;
+  var v_shader, f_shader, shaderprogram;
+  var all_fish = [];
+
+  var step_x = 0.005;
+  var step_y = 0.005;
+
+  // BONUS: CONTROL RED FISH WITH W, A, S, D
+  var keys = {};
+
+  window.addEventListener('keydown', function(event) {
+    var key = event.key.toLowerCase();
+
+    if (key == 'w' || key == 'a' ||
+        key == 's' || key == 'd') {
+      keys[key] = true;
+      event.preventDefault();
+    }
+  });
+
+  window.addEventListener('keyup', function(event) {
+    keys[event.key.toLowerCase()] = false;
+  });
+
+  window.addEventListener('blur', function() {
+    keys = {};
+  });
+
+  window.onload = function() {
+
+    c = document.getElementById('c');
+    c.width = window.innerWidth;
+    c.height = window.innerHeight;
+
+    gl = c.getContext('webgl', { alpha: true });
+
+    if (!gl) {
+      alert('WebGL is not supported.');
+      return;
+    }
+
+    gl.viewport(0, 0, c.width, c.height);
+
+    // SHADERS
+    v_shader = gl.createShader(gl.VERTEX_SHADER);
+    f_shader = gl.createShader(gl.FRAGMENT_SHADER);
+
+    gl.shaderSource(
+      v_shader,
+      document.getElementById('vertexshader').textContent
+    );
+    gl.compileShader(v_shader);
+
+    if (!gl.getShaderParameter(v_shader, gl.COMPILE_STATUS)) {
+      console.log(gl.getShaderInfoLog(v_shader));
+    }
+
+    gl.shaderSource(
+      f_shader,
+      document.getElementById('fragmentshader').textContent
+    );
+    gl.compileShader(f_shader);
+
+    if (!gl.getShaderParameter(f_shader, gl.COMPILE_STATUS)) {
+      console.log(gl.getShaderInfoLog(f_shader));
+    }
+
+    shaderprogram = gl.createProgram();
+
+    gl.attachShader(shaderprogram, v_shader);
+    gl.attachShader(shaderprogram, f_shader);
+    gl.linkProgram(shaderprogram);
+    gl.useProgram(shaderprogram);
+
+    // PART 9: TRANSPARENCY
+    gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.DEPTH_TEST);
+
+    // ORIGINAL WHITE FISH
+    all_fish.push(
+      createFish(
+        new Float32Array([-0.2, -0.2, 0]),
+        new Float32Array([1, 1, 1, 1]),
+        0.45,
+        1
+      )
+    );
+
+    // ORIGINAL RED FISH - KEYBOARD CONTROLLED
+    all_fish.push(
+      createFish(
+        new Float32Array([0.2, 0.2, 0]),
+        new Float32Array([1, 0, 0, 0.7]),
+        0.60,
+        -1
+      )
+    );
+
+    // PART 4: CREATE 100 SMALL RANDOM FISH
+    for (var i = 0; i < 100; i++) {
+
+      var random_color = new Float32Array([
+        Math.random(),
+        Math.random(),
+        Math.random(),
+        0.5
+      ]);
+
+      var random_offset = new Float32Array([
+        Math.random() * 1.8 - 0.9,
+        Math.random() * 1.8 - 0.9,
+        0
+      ]);
+
+      var random_scale = 0.15 + Math.random() * 0.20;
+
+      var random_direction =
+        Math.random() < 0.5 ? 1 : -1;
+
+      all_fish.push(
+        createFish(
+          random_offset,
+          random_color,
+          random_scale,
+          random_direction
+        )
+      );
+    }
+
+    animate();
+  };
+
+
+  function createFish(offset, color, scale, direction) {
+
+    // PART 1: PROFESSOR'S FISH VERTICES
+    var vertices = new Float32Array([
+       0.5,  0.0,  0.0,
+       0.2,  0.25, 0.0,
+      -0.2,  0.15, 0.0,
+      -0.4,  0.3,  0.0,
+      -0.4, -0.3,  0.0,
+      -0.2, -0.15, 0.0,
+       0.2, -0.25, 0.0
+    ]);
+
+    // PART 1: PROFESSOR'S 15 INDICES
+    var indices = new Uint8Array([
+      0, 1, 6,
+      1, 2, 6,
+      2, 5, 6,
+      2, 3, 5,
+      3, 4, 5
+    ]);
+
+    // BODY BUFFER
+    var v_buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, v_buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    // EYE BUFFER
+    var eye_vertex = new Float32Array([
+      0.30, 0.0, 0.0
+    ]);
+
+    var eye_v_buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, eye_v_buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, eye_vertex, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    // INDEX BUFFER
+    var i_buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, i_buffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+
+    return [
+      v_buffer,
+      i_buffer,
+      eye_v_buffer,
+      color,
+      offset,
+      scale,
+      direction,
+      Math.random() * 6.28,
+      0.002 + Math.random() * 0.004,
+      offset[1]
+    ];
+  }
+
+
+  function animate() {
+
+    requestAnimationFrame(animate);
+
+    // PART 10: TRANSPARENT CANVAS
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    var a_position = gl.getAttribLocation(
+      shaderprogram, 'a_position'
+    );
+
+    var u_transform = gl.getUniformLocation(
+      shaderprogram, 'u_transform'
+    );
+
+    var u_color = gl.getUniformLocation(
+      shaderprogram, 'u_color'
+    );
+
+    var u_pointsize = gl.getUniformLocation(
+      shaderprogram, 'u_pointsize'
+    );
+
+    var u_is_eye = gl.getUniformLocation(
+      shaderprogram, 'u_is_eye'
+    );
+
+    var time = performance.now() * 0.001;
+
+    for (var r = 0; r < all_fish.length; r++) {
+
+      var current_buffers = all_fish[r];
+
+      var current_v_buffer = current_buffers[0];
+      var current_i_buffer = current_buffers[1];
+      var current_eye_v_buffer = current_buffers[2];
+      var current_color = current_buffers[3];
+      var current_offset = current_buffers[4];
+      var current_scale = current_buffers[5];
+      var current_direction = current_buffers[6];
+
+      // PART 5: SMALL FISH SWIMMING
+      if (r >= 2) {
+
+        var phase = current_buffers[7];
+        var speed = current_buffers[8];
+        var original_y = current_buffers[9];
+
+        current_offset[0] += current_direction * speed;
+
+        phase += 0.05;
+
+        current_offset[1] =
+          original_y + Math.sin(phase) * 0.025;
+
+        current_buffers[7] = phase;
+
+        // REAPPEAR ON OPPOSITE SIDE
+        if (current_direction > 0 &&
+            current_offset[0] > 1.0 + current_scale * 0.5) {
+
+          current_offset[0] = -1.0 - current_scale * 0.5;
+
+        } else if (current_direction < 0 &&
+                   current_offset[0] < -1.0 - current_scale * 0.5) {
+
+          current_offset[0] = 1.0 + current_scale * 0.5;
+        }
+
+      } else if (r == 1) {
+
+        // BONUS: MOVE RED FISH WITH W, A, S, D
+        var control_speed = 0.012;
+
+        if (keys['w']) {
+          current_offset[1] += control_speed;
+        }
+
+        if (keys['s']) {
+          current_offset[1] -= control_speed;
+        }
+
+        if (keys['a']) {
+          current_offset[0] -= control_speed;
+          current_direction = -1;
+        }
+
+        if (keys['d']) {
+          current_offset[0] += control_speed;
+          current_direction = 1;
+        }
+
+        // KEEP RED FISH INSIDE SCREEN
+        var red_horizontal_limit =
+          1.0 - current_scale * 0.55;
+
+        var red_vertical_limit =
+          1.0 - current_scale * 0.35;
+
+        current_offset[0] = Math.max(
+          -red_horizontal_limit,
+          Math.min(red_horizontal_limit, current_offset[0])
+        );
+
+        current_offset[1] = Math.max(
+          -red_vertical_limit,
+          Math.min(red_vertical_limit, current_offset[1])
+        );
+
+        current_buffers[6] = current_direction;
+
+      } else {
+
+        // ORIGINAL WHITE FISH MOVEMENT
+        current_offset[0] += current_direction * step_x;
+        current_offset[1] += current_direction * step_y;
+
+        var horizontal_limit =
+          1.0 - current_scale * 0.55;
+
+        var vertical_limit =
+          1.0 - current_scale * 0.35;
+
+        if (current_offset[0] <= -horizontal_limit ||
+            current_offset[0] >= horizontal_limit ||
+            current_offset[1] <= -vertical_limit ||
+            current_offset[1] >= vertical_limit) {
+
+          current_direction *= -1;
+
+          current_offset[0] = Math.max(
+            -horizontal_limit,
+            Math.min(horizontal_limit, current_offset[0])
+          );
+
+          current_offset[1] = Math.max(
+            -vertical_limit,
+            Math.min(vertical_limit, current_offset[1])
+          );
+
+          current_buffers[6] = current_direction;
+        }
+      }
+
+      // PART 7: SMOOTH ROTATION 0 TO 10 DEGREES
+      var theta =
+        (5 + 5 * Math.sin(time * 2 + current_buffers[7]))
+        * Math.PI / 180;
+
+      // PARTS 8 AND 11: SCALE, ROTATE, FLIP
+      var facing = current_direction;
+
+      var cosTheta = Math.cos(theta);
+      var sinTheta = Math.sin(theta);
+
+      var transform = new Float32Array([
+        facing * current_scale * cosTheta,
+        facing * current_scale * sinTheta,
+        0, 0,
+
+        -current_scale * sinTheta,
+        current_scale * cosTheta,
+        0, 0,
+
+        0, 0, current_scale, 0,
+
+        current_offset[0],
+        current_offset[1],
+        current_offset[2],
+        1
+      ]);
+
+      gl.uniformMatrix4fv(
+        u_transform,
+        false,
+        transform
+      );
+
+      // PART 12: BLUE-ISH PULSATING SMALL FISH
+      if (r >= 2) {
+
+        var t = time + current_buffers[7];
+
+        var alpha = 0.5 + 0.2 * Math.sin(t * 2);
+
+        current_color = new Float32Array([
+          0.2 + 0.1 * Math.sin(t),
+          0.6 + 0.1 * Math.sin(t + 2),
+          0.9,
+          alpha
+        ]);
+      }
+
+      // WHITE FISH: FULLY OPAQUE
+      if (r == 0) {
+        current_color = new Float32Array([1, 1, 1, 1]);
+      }
+
+      // RED FISH: 70% OPAQUE
+      if (r == 1) {
+        current_color = new Float32Array([1, 0, 0, 0.7]);
+      }
+
+      // DRAW FISH BODY
+      gl.uniform1f(u_is_eye, 0.0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, current_v_buffer);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, current_i_buffer);
+
+      gl.vertexAttribPointer(
+        a_position, 3, gl.FLOAT, false, 0, 0
+      );
+
+      gl.enableVertexAttribArray(a_position);
+      gl.uniform4fv(u_color, current_color);
+
+      gl.drawElements(
+        gl.TRIANGLES, 15, gl.UNSIGNED_BYTE, 0
+      );
+
+      // DRAW ROUND BLACK EYE
+      gl.uniform1f(u_is_eye, 1.0);
+
+      gl.uniform1f(
+        u_pointsize,
+        Math.max(2.0, current_scale * 16.0)
+      );
+
+      gl.uniform4fv(
+        u_color,
+        new Float32Array([0, 0, 0, 1])
+      );
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, current_eye_v_buffer);
+
+      gl.vertexAttribPointer(
+        a_position, 3, gl.FLOAT, false, 0, 0
+      );
+
+      gl.enableVertexAttribArray(a_position);
+      gl.drawArrays(gl.POINTS, 0, 1);
+    }
+  }
+</script>
+
+<body>
+  <canvas id="c"></canvas>
+</body>
+</html>

@@ -1,0 +1,704 @@
+<html>
+
+<head>
+  <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+  <meta content="utf-8" http-equiv="encoding">
+  <title>Flashy Fish WebGPU!</title>
+
+  <style>
+    html,
+    body {
+      background: url('https://cs460.org/assignments/04/bg.jpg');
+      background-size: cover;
+      background-position: center;
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      overflow: hidden !important;
+    }
+
+    #c {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    #error-overlay {
+      display: none;
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(15, 23, 42, 0.95);
+      color: #f8fafc;
+      padding: 32px 40px;
+      border-radius: 16px;
+      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.6);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 520px;
+      text-align: center;
+      z-index: 10000;
+      border: 1px solid rgba(239, 68, 68, 0.4);
+    }
+
+    #error-overlay h2 {
+      margin-top: 0;
+      color: #ef4444;
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    #error-overlay p {
+      font-size: 15px;
+      line-height: 1.6;
+      color: #cbd5e1;
+    }
+
+    #error-overlay .hint {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-top: 16px;
+      margin-bottom: 0;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+  </style>
+</head>
+
+<script type="text/javascript" src="https://cs460.org/js/glmatrix.js"></script>
+
+<script>
+  // WebGPU Global Objects
+  var adapter, device, context, format;
+  var bodyPipeline, eyePipeline;
+  var bindGroupLayout, bindGroup;
+  var uniformBuffer, cpuUniforms;
+  var fishVertexBuffer, fishIndexBuffer;
+  var alignment = 256;
+
+  var c;
+  var all_fish = [];
+
+  var step_x = 0.005;
+  var step_y = 0.005;
+
+  // BONUS: CONTROL RED FISH WITH W, A, S, D
+  var keys = {};
+
+  window.addEventListener('keydown', function (event) {
+    var key = event.key.toLowerCase();
+
+    if (key == 'w' || key == 'a' ||
+      key == 's' || key == 'd') {
+      keys[key] = true;
+      event.preventDefault();
+    }
+  });
+
+  window.addEventListener('keyup', function (event) {
+    keys[event.key.toLowerCase()] = false;
+  });
+
+  window.addEventListener('blur', function () {
+    keys = {};
+  });
+
+  function showError(message) {
+    var overlay = document.getElementById('error-overlay');
+    var msgElem = document.getElementById('error-message');
+    if (overlay && msgElem) {
+      msgElem.innerHTML = message;
+      overlay.style.display = 'block';
+    } else {
+      alert(message);
+    }
+  }
+
+  function resize() {
+    var width = Math.max(1, window.innerWidth);
+    var height = Math.max(1, window.innerHeight);
+    if (c.width !== width || c.height !== height) {
+      c.width = width;
+      c.height = height;
+    }
+  }
+
+  window.addEventListener('resize', resize);
+
+  window.onload = async function () {
+    c = document.getElementById('c');
+    resize();
+
+    // Check WebGPU Support
+    if (!navigator.gpu) {
+      showError(
+        'WebGPU is not supported or not enabled in this browser.<br><br>' +
+        'To view this WebGPU implementation, please open this page in <strong>Microsoft Edge</strong> ' +
+        'or <strong>Google Chrome</strong> (version 113+).'
+      );
+      return;
+    }
+
+    try {
+      adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        showError(
+          'Failed to find an appropriate GPU adapter for WebGPU.<br>' +
+          'Your graphics hardware or driver might not support WebGPU.'
+        );
+        return;
+      }
+
+      device = await adapter.requestDevice();
+      context = c.getContext('webgpu');
+      format = navigator.gpu.getPreferredCanvasFormat();
+
+      context.configure({
+        device: device,
+        format: format,
+        alphaMode: 'premultiplied'
+      });
+    } catch (err) {
+      showError('WebGPU initialization failed: ' + err.message);
+      return;
+    }
+
+    // Determine uniform buffer offset alignment (guaranteed <= 256)
+    alignment = Math.max(256, device.limits.minUniformBufferOffsetAlignment || 256);
+
+    // WGSL SHADERS
+    var wgslCode = `
+      struct Uniforms {
+        transform: mat4x4<f32>,
+        color: vec4<f32>,
+        pointSize: f32,
+        isEye: f32,
+        canvasWidth: f32,
+        canvasHeight: f32,
+      };
+
+      @group(0) @binding(0) var<uniform> u: Uniforms;
+
+      // --- FISH BODY SHADERS ---
+      struct BodyVertexInput {
+        @location(0) position: vec3<f32>,
+      };
+
+      struct BodyVertexOutput {
+        @builtin(position) position: vec4<f32>,
+      };
+
+      @vertex
+      fn vs_body(in: BodyVertexInput) -> BodyVertexOutput {
+        var out: BodyVertexOutput;
+        out.position = u.transform * vec4<f32>(in.position, 1.0);
+        return out;
+      }
+
+      @fragment
+      fn fs_body() -> @location(0) vec4<f32> {
+        return u.color;
+      }
+
+      // --- FISH EYE SHADERS (Procedural Billboard Quad with Round Discard) ---
+      struct EyeVertexOutput {
+        @builtin(position) position: vec4<f32>,
+        @location(0) uv: vec2<f32>,
+      };
+
+      @vertex
+      fn vs_eye(@builtin(vertex_index) vertex_index: u32) -> EyeVertexOutput {
+        var out: EyeVertexOutput;
+
+        var corners = array<vec2<f32>, 6>(
+          vec2<f32>(-1.0, -1.0),
+          vec2<f32>( 1.0, -1.0),
+          vec2<f32>(-1.0,  1.0),
+          vec2<f32>(-1.0,  1.0),
+          vec2<f32>( 1.0, -1.0),
+          vec2<f32>( 1.0,  1.0)
+        );
+
+        let corner = corners[vertex_index];
+        out.uv = corner * 0.5;
+
+        // Eye center in clip space
+        let eye_center = u.transform * vec4<f32>(0.30, 0.0, 0.0, 1.0);
+
+        let clip_radius = vec2<f32>(
+          (u.pointSize / max(u.canvasWidth, 1.0)) * 2.0,
+          (u.pointSize / max(u.canvasHeight, 1.0)) * 2.0
+        );
+
+        out.position = vec4<f32>(
+          eye_center.xy + corner * clip_radius * 0.5 * eye_center.w,
+          eye_center.z,
+          eye_center.w
+        );
+        return out;
+      }
+
+      @fragment
+      fn fs_eye(in: EyeVertexOutput) -> @location(0) vec4<f32> {
+        if (length(in.uv) > 0.5) {
+          discard;
+        }
+        return u.color;
+      }
+    `;
+
+    var shaderModule = device.createShaderModule({
+      label: 'FlashyFishShaders',
+      code: wgslCode
+    });
+
+    // BIND GROUP LAYOUT
+    bindGroupLayout = device.createBindGroupLayout({
+      label: 'FishBindGroupLayout',
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: {
+            type: 'uniform',
+            hasDynamicOffset: true,
+            minBindingSize: 96
+          }
+        }
+      ]
+    });
+
+    var pipelineLayout = device.createPipelineLayout({
+      label: 'FishPipelineLayout',
+      bindGroupLayouts: [bindGroupLayout]
+    });
+
+    // PART 9: TRANSPARENCY BLEND STATE
+    var blendState = {
+      color: {
+        srcFactor: 'src-alpha',
+        dstFactor: 'one-minus-src-alpha',
+        operation: 'add'
+      },
+      alpha: {
+        srcFactor: 'one',
+        dstFactor: 'one-minus-src-alpha',
+        operation: 'add'
+      }
+    };
+
+    // BODY PIPELINE
+    bodyPipeline = device.createRenderPipeline({
+      label: 'FishBodyPipeline',
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs_body',
+        buffers: [
+          {
+            arrayStride: 12, // 3 floats * 4 bytes
+            attributes: [
+              {
+                shaderLocation: 0,
+                offset: 0,
+                format: 'float32x3'
+              }
+            ]
+          }
+        ]
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: 'fs_body',
+        targets: [
+          {
+            format: format,
+            blend: blendState,
+            writeMask: GPUColorWrite.ALL
+          }
+        ]
+      },
+      primitive: {
+        topology: 'triangle-list',
+        cullMode: 'none'
+      }
+    });
+
+    // EYE PIPELINE (Procedural quad, no vertex buffer)
+    eyePipeline = device.createRenderPipeline({
+      label: 'FishEyePipeline',
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: 'vs_eye'
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: 'fs_eye',
+        targets: [
+          {
+            format: format,
+            blend: blendState,
+            writeMask: GPUColorWrite.ALL
+          }
+        ]
+      },
+      primitive: {
+        topology: 'triangle-list',
+        cullMode: 'none'
+      }
+    });
+
+    // PART 1: PROFESSOR'S FISH VERTICES (GPU Buffer)
+    var vertices = new Float32Array([
+      0.5, 0.0, 0.0,
+      0.2, 0.25, 0.0,
+      -0.2, 0.15, 0.0,
+      -0.4, 0.3, 0.0,
+      -0.4, -0.3, 0.0,
+      -0.2, -0.15, 0.0,
+      0.2, -0.25, 0.0
+    ]);
+
+    fishVertexBuffer = device.createBuffer({
+      label: 'FishVertexBuffer',
+      size: vertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+    });
+    device.queue.writeBuffer(fishVertexBuffer, 0, vertices);
+
+    // PART 1: PROFESSOR'S 15 INDICES (Uint32 for WebGPU 4-byte writeBuffer alignment)
+    var indices = new Uint32Array([
+      0, 1, 6,
+      1, 2, 6,
+      2, 5, 6,
+      2, 3, 5,
+      3, 4, 5
+    ]);
+
+    fishIndexBuffer = device.createBuffer({
+      label: 'FishIndexBuffer',
+      size: indices.byteLength,
+      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
+    });
+    device.queue.writeBuffer(fishIndexBuffer, 0, indices);
+
+    // ORIGINAL WHITE FISH
+    all_fish.push(
+      createFish(
+        new Float32Array([-0.2, -0.2, 0]),
+        new Float32Array([1, 1, 1, 1]),
+        0.45,
+        1
+      )
+    );
+
+    // ORIGINAL RED FISH - KEYBOARD CONTROLLED
+    all_fish.push(
+      createFish(
+        new Float32Array([0.2, 0.2, 0]),
+        new Float32Array([1, 0, 0, 0.7]),
+        0.60,
+        -1
+      )
+    );
+
+    // PART 4: CREATE 100 SMALL RANDOM FISH
+    for (var i = 0; i < 100; i++) {
+      var random_color = new Float32Array([
+        Math.random(),
+        Math.random(),
+        Math.random(),
+        0.5
+      ]);
+
+      var random_offset = new Float32Array([
+        Math.random() * 1.8 - 0.9,
+        Math.random() * 1.8 - 0.9,
+        0
+      ]);
+
+      var random_scale = 0.15 + Math.random() * 0.20;
+
+      var random_direction =
+        Math.random() < 0.5 ? 1 : -1;
+
+      all_fish.push(
+        createFish(
+          random_offset,
+          random_color,
+          random_scale,
+          random_direction
+        )
+      );
+    }
+
+    // Allocate uniform buffer for all fish (2 slots per fish: body + eye)
+    var totalSlots = Math.max(256, all_fish.length * 2);
+    var bufferSize = totalSlots * alignment;
+
+    uniformBuffer = device.createBuffer({
+      label: 'FishUniformBuffer',
+      size: bufferSize,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    cpuUniforms = new Float32Array(totalSlots * (alignment / 4));
+
+    bindGroup = device.createBindGroup({
+      label: 'FishBindGroup',
+      layout: bindGroupLayout,
+      entries: [
+        {
+          binding: 0,
+          resource: {
+            buffer: uniformBuffer,
+            offset: 0,
+            size: 96
+          }
+        }
+      ]
+    });
+
+    animate();
+  };
+
+  function createFish(offset, color, scale, direction) {
+    return [
+      null, // v_buffer placeholder
+      null, // i_buffer placeholder
+      null, // eye_v_buffer placeholder
+      color,
+      offset,
+      scale,
+      direction,
+      Math.random() * 6.28,
+      0.002 + Math.random() * 0.004,
+      offset[1]
+    ];
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+
+    resize();
+
+    var time = performance.now() * 0.001;
+    var floatsPerSlot = alignment / 4;
+
+    for (var r = 0; r < all_fish.length; r++) {
+      var current_buffers = all_fish[r];
+
+      var current_color = current_buffers[3];
+      var current_offset = current_buffers[4];
+      var current_scale = current_buffers[5];
+      var current_direction = current_buffers[6];
+
+      // PART 5: SMALL FISH SWIMMING
+      if (r >= 2) {
+        var phase = current_buffers[7];
+        var speed = current_buffers[8];
+        var original_y = current_buffers[9];
+
+        current_offset[0] += current_direction * speed;
+        phase += 0.05;
+        current_offset[1] =
+          original_y + Math.sin(phase) * 0.025;
+
+        current_buffers[7] = phase;
+
+        // REAPPEAR ON OPPOSITE SIDE
+        if (current_direction > 0 &&
+          current_offset[0] > 1.0 + current_scale * 0.5) {
+          current_offset[0] = -1.0 - current_scale * 0.5;
+        } else if (current_direction < 0 &&
+          current_offset[0] < -1.0 - current_scale * 0.5) {
+          current_offset[0] = 1.0 + current_scale * 0.5;
+        }
+      } else if (r == 1) {
+        // BONUS: MOVE RED FISH WITH W, A, S, D
+        var control_speed = 0.012;
+
+        if (keys['w']) {
+          current_offset[1] += control_speed;
+        }
+        if (keys['s']) {
+          current_offset[1] -= control_speed;
+        }
+        if (keys['a']) {
+          current_offset[0] -= control_speed;
+          current_direction = -1;
+        }
+        if (keys['d']) {
+          current_offset[0] += control_speed;
+          current_direction = 1;
+        }
+
+        // KEEP RED FISH INSIDE SCREEN
+        var red_horizontal_limit =
+          1.0 - current_scale * 0.55;
+        var red_vertical_limit =
+          1.0 - current_scale * 0.35;
+
+        current_offset[0] = Math.max(
+          -red_horizontal_limit,
+          Math.min(red_horizontal_limit, current_offset[0])
+        );
+
+        current_offset[1] = Math.max(
+          -red_vertical_limit,
+          Math.min(red_vertical_limit, current_offset[1])
+        );
+
+        current_buffers[6] = current_direction;
+      } else {
+        // ORIGINAL WHITE FISH MOVEMENT
+        current_offset[0] += current_direction * step_x;
+        current_offset[1] += current_direction * step_y;
+
+        var horizontal_limit =
+          1.0 - current_scale * 0.55;
+        var vertical_limit =
+          1.0 - current_scale * 0.35;
+
+        if (current_offset[0] <= -horizontal_limit ||
+          current_offset[0] >= horizontal_limit ||
+          current_offset[1] <= -vertical_limit ||
+          current_offset[1] >= vertical_limit) {
+
+          current_direction *= -1;
+
+          current_offset[0] = Math.max(
+            -horizontal_limit,
+            Math.min(horizontal_limit, current_offset[0])
+          );
+
+          current_offset[1] = Math.max(
+            -vertical_limit,
+            Math.min(vertical_limit, current_offset[1])
+          );
+
+          current_buffers[6] = current_direction;
+        }
+      }
+
+      // PART 7: SMOOTH ROTATION 0 TO 10 DEGREES
+      var theta =
+        (5 + 5 * Math.sin(time * 2 + current_buffers[7]))
+        * Math.PI / 180;
+
+      // PARTS 8 AND 11: SCALE, ROTATE, FLIP
+      var facing = current_direction;
+      var cosTheta = Math.cos(theta);
+      var sinTheta = Math.sin(theta);
+
+      var transform = new Float32Array([
+        facing * current_scale * cosTheta,
+        facing * current_scale * sinTheta,
+        0, 0,
+
+        -current_scale * sinTheta,
+        current_scale * cosTheta,
+        0, 0,
+
+        0, 0, current_scale, 0,
+
+        current_offset[0],
+        current_offset[1],
+        current_offset[2],
+        1
+      ]);
+
+      // PART 12: BLUE-ISH PULSATING SMALL FISH
+      if (r >= 2) {
+        var t = time + current_buffers[7];
+        var alpha = 0.5 + 0.2 * Math.sin(t * 2);
+
+        current_color = new Float32Array([
+          0.2 + 0.1 * Math.sin(t),
+          0.6 + 0.1 * Math.sin(t + 2),
+          0.9,
+          alpha
+        ]);
+      }
+
+      // WHITE FISH: FULLY OPAQUE
+      if (r == 0) {
+        current_color = new Float32Array([1, 1, 1, 1]);
+      }
+
+      // RED FISH: 70% OPAQUE
+      if (r == 1) {
+        current_color = new Float32Array([1, 0, 0, 0.7]);
+      }
+
+      // 1. Populate Body Uniforms (Slot: r * 2)
+      var bodySlot = r * 2;
+      var bodyBase = bodySlot * floatsPerSlot;
+      cpuUniforms.set(transform, bodyBase + 0);
+      cpuUniforms.set(current_color, bodyBase + 16);
+      cpuUniforms[bodyBase + 20] = 0.0; // pointSize
+      cpuUniforms[bodyBase + 21] = 0.0; // isEye
+      cpuUniforms[bodyBase + 22] = c.width;
+      cpuUniforms[bodyBase + 23] = c.height;
+
+      // 2. Populate Eye Uniforms (Slot: r * 2 + 1)
+      var eyeSlot = r * 2 + 1;
+      var eyeBase = eyeSlot * floatsPerSlot;
+      cpuUniforms.set(transform, eyeBase + 0);
+      cpuUniforms.set([0, 0, 0, 1], eyeBase + 16); // Black eye
+      cpuUniforms[eyeBase + 20] = Math.max(2.0, current_scale * 16.0); // pointSize
+      cpuUniforms[eyeBase + 21] = 1.0; // isEye
+      cpuUniforms[eyeBase + 22] = c.width;
+      cpuUniforms[eyeBase + 23] = c.height;
+    }
+
+    // Upload all uniforms to GPU in a single write
+    device.queue.writeBuffer(uniformBuffer, 0, cpuUniforms);
+
+    // PART 10: TRANSPARENT CANVAS RENDER PASS
+    var commandEncoder = device.createCommandEncoder();
+    var textureView = context.getCurrentTexture().createView();
+
+    var renderPass = commandEncoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: textureView,
+          clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+          loadOp: 'clear',
+          storeOp: 'store'
+        }
+      ]
+    });
+
+    for (var r = 0; r < all_fish.length; r++) {
+      // DRAW FISH BODY
+      renderPass.setPipeline(bodyPipeline);
+      renderPass.setBindGroup(0, bindGroup, [r * 2 * alignment]);
+      renderPass.setVertexBuffer(0, fishVertexBuffer);
+      renderPass.setIndexBuffer(fishIndexBuffer, 'uint32');
+      renderPass.drawIndexed(15);
+
+      // DRAW ROUND BLACK EYE
+      renderPass.setPipeline(eyePipeline);
+      renderPass.setBindGroup(0, bindGroup, [(r * 2 + 1) * alignment]);
+      renderPass.draw(6);
+    }
+
+    renderPass.end();
+    device.queue.submit([commandEncoder.finish()]);
+  }
+</script>
+
+<body>
+  <div id="error-overlay">
+    <h2>WebGPU Not Available</h2>
+    <p id="error-message"></p>
+    <p class="hint">
+      CS460 Flashy Fish Superbonus requires native WebGPU support.
+    </p>
+  </div>
+  <canvas id="c"></canvas>
+</body>
+
+</html>
